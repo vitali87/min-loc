@@ -67,9 +67,10 @@ fn run_hook() {
         ParsedToolInput::Write { file_path, content } => (file_path.as_str(), content.clone()),
         ParsedToolInput::Edit {
             file_path,
+            old_string,
             new_string,
         } => {
-            let full = reconstruct_edit(file_path, new_string);
+            let full = reconstruct_edit(file_path, old_string, new_string);
             (file_path.as_str(), full)
         }
     };
@@ -79,12 +80,11 @@ fn run_hook() {
         return;
     }
 
-    let lang = config::lang(&cfg);
-    let module = config::module_name(&cfg);
-    let test_cmd = config::test_cmd(&cfg);
+    let lang = config::lang_from_path(file_path);
+    let test_cmd = config::test_cmd_for_lang(&cfg, lang);
     let timeout = config::timeout_secs(&cfg);
 
-    match compress::run(&content, lang, module, test_cmd, timeout, cwd) {
+    match compress::run(&content, lang, &test_cmd, timeout, cwd, &relative) {
         Ok(result) => {
             if result.final_loc < result.original_loc {
                 let reason = format!(
@@ -96,8 +96,7 @@ fn run_hook() {
             }
         }
         Err(e) => {
-            let reason = format!("min-loc: compression failed: {e}");
-            print!("{}", hook::deny(reason));
+            eprintln!("[min-loc] compression skipped: {e}");
         }
     }
 }
@@ -111,15 +110,9 @@ fn run_check(file: &Path, test_file: Option<String>) {
         }
     };
 
-    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let lang = match ext {
-        "py" => "python",
-        "rs" => "rust",
-        "js" => "javascript",
-        "ts" => "typescript",
-        "go" => "go",
-        _ => "python",
-    };
+    let file_str = file.to_string_lossy();
+    let lang = config::lang_from_path(&file_str);
+    let test_cmd = config::default_test_cmd(lang);
 
     let stats = counting::count_loc(&content, lang);
     println!("total: {}", stats.total);
@@ -128,7 +121,8 @@ fn run_check(file: &Path, test_file: Option<String>) {
 
     if test_file.is_some() {
         let cwd = file.parent().unwrap_or(Path::new("."));
-        match compress::run(&content, lang, "solution", "python -m pytest", 30, cwd) {
+        let file_name = file.file_name().unwrap_or_default().to_string_lossy();
+        match compress::run(&content, lang, test_cmd, 30, cwd, &file_name) {
             Ok(result) => {
                 println!(
                     "compressed: {} -> {} lines ({} rounds)",
@@ -159,9 +153,11 @@ fn parse_tool_input(input: &HookInput) -> Option<ParsedToolInput> {
         }
         "Edit" => {
             let file_path = obj.get("file_path")?.as_str()?.to_string();
+            let old_string = obj.get("old_string")?.as_str()?.to_string();
             let new_string = obj.get("new_string")?.as_str()?.to_string();
             Some(ParsedToolInput::Edit {
                 file_path,
+                old_string,
                 new_string,
             })
         }
@@ -169,12 +165,9 @@ fn parse_tool_input(input: &HookInput) -> Option<ParsedToolInput> {
     }
 }
 
-fn reconstruct_edit(file_path: &str, new_string: &str) -> String {
+fn reconstruct_edit(file_path: &str, old_string: &str, new_string: &str) -> String {
     match std::fs::read_to_string(file_path) {
-        Ok(existing) => existing.replacen(
-            &existing, // full replacement for simplicity in LOC counting
-            new_string, 1,
-        ),
+        Ok(existing) => existing.replacen(old_string, new_string, 1),
         Err(_) => new_string.to_string(),
     }
 }
@@ -185,4 +178,29 @@ fn make_relative(file_path: &str, cwd: &str) -> String {
         .unwrap_or(file_path)
         .trim_start_matches('/')
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconstruct_edit_splices_old_for_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.py");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+        let result = reconstruct_edit(&path.to_string_lossy(), "b", "B");
+        assert_eq!(result, "a\nB\nc\n");
+    }
+
+    #[test]
+    fn reconstruct_edit_falls_back_to_new_string() {
+        assert_eq!(reconstruct_edit("/nonexistent/x.py", "a", "b"), "b");
+    }
+
+    #[test]
+    fn make_relative_strips_cwd() {
+        assert_eq!(make_relative("/repo/src/a.py", "/repo"), "src/a.py");
+        assert_eq!(make_relative("src/a.py", "/other"), "src/a.py");
+    }
 }

@@ -15,6 +15,7 @@ pub enum ParsedToolInput {
     },
     Edit {
         file_path: String,
+        old_string: String,
         new_string: String,
     },
 }
@@ -22,9 +23,7 @@ pub enum ParsedToolInput {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub lang: Option<String>,
     pub test_cmd: Option<String>,
-    pub module_name: Option<String>,
     pub timeout: Option<u32>,
     pub include: Option<Vec<String>>,
     pub exclude: Option<Vec<String>>,
